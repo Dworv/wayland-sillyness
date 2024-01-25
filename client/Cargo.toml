@@ -1,0 +1,6 @@
+[workspace]
+members = ["choose_decor_mode", "get_supported_modes"]
+resolver = "2"
+
+[patch.crates-io]
+wayland-protocols = { path = "../wayland-rs/wayland-protocols" }

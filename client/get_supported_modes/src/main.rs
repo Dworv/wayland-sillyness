@@ -9,7 +9,10 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum,
 };
 
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::{shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base}, decoration::zv1::client::{zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1}};
+
+static mut DONT_ACK: bool = false;
+static mut REQUESTED: bool = false;
 
 fn main() {
     let conn = Connection::connect_to_env().unwrap();
@@ -28,6 +31,7 @@ fn main() {
         xdg_surface: None,
         seat: None,
         configured: false,
+        dec_man: None
     };
 
     println!("Starting the example window app, press <ESC> to quit.");
@@ -45,6 +49,7 @@ struct State {
     xdg_surface: Option<(xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel)>,
     seat: Option<wl_seat::WlSeat>,
     configured: bool,
+    dec_man: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -97,12 +102,27 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     let seat = registry.bind::<wl_seat::WlSeat, _, _>(name, 1, qh, ());
                     state.seat = Some(seat);
                 }
+                "zxdg_decoration_manager_v1" => {
+                    let manager = registry.bind::<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, _, _>(name, 1, qh, ());
+                    state.dec_man = Some(manager);
+                }
                 "xdg_wm_base" => {
                     let wm_base = registry.bind::<xdg_wm_base::XdgWmBase, _, _>(name, 1, qh, ());
                     state.wm_base = Some(wm_base);
 
                     if state.base_surface.is_some() && state.xdg_surface.is_none() {
                         state.init_xdg_surface(qh);
+                    }
+
+                    if let Some(decor_man) = &state.dec_man {
+                        let decor = decor_man.get_toplevel_decoration(&state.xdg_surface.as_ref().unwrap().1, qh, ());
+                    //     if std::env::args().nth(1).unwrap() == "0" {
+                        decor.set_mode(zxdg_toplevel_decoration_v1::Mode::ClientSide);
+                    //     } else if std::env::args().nth(1).unwrap() == "1" {
+                    //         decor.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+                    //     } else {
+                    //         decor.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSideOverlay);
+                    //     }
                     }
                 }
                 _ => {}
@@ -117,6 +137,7 @@ delegate_noop!(State: ignore wl_surface::WlSurface);
 delegate_noop!(State: ignore wl_shm::WlShm);
 delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore wl_buffer::WlBuffer);
+delegate_noop!(State: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
 
 fn draw(tmp: &mut File, (buf_x, buf_y): (u32, u32)) {
     use std::{cmp::min, io::Write};
@@ -146,6 +167,7 @@ impl State {
 
         base_surface.commit();
 
+        println!("making xdg");
         self.xdg_surface = Some((xdg_surface, toplevel));
     }
 }
@@ -175,12 +197,14 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let xdg_surface::Event::Configure { serial, .. } = event {
-            xdg_surface.ack_configure(serial);
-            state.configured = true;
-            let surface = state.base_surface.as_ref().unwrap();
-            if let Some(ref buffer) = state.buffer {
-                surface.attach(Some(buffer), 0, 0);
-                surface.commit();
+            if !unsafe { DONT_ACK } {
+                xdg_surface.ack_configure(serial);
+                state.configured = true;
+                let surface = state.base_surface.as_ref().unwrap();
+                if let Some(ref buffer) = state.buffer {
+                    surface.attach(Some(buffer), 0, 0);
+                    surface.commit();
+                }
             }
         }
     }
@@ -235,27 +259,61 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 // ESC key
                 state.running = false;
             }
+            dbg!(key);
         }
     }
 }
 
-// impl Dispatch<wl_pointer::WlPointer, ()> for State {
-//     fn event(
-//         state: &mut Self,
-//         _: &wl_pointer::WlPointer,
-//         event: wl_pointer::Event,
-//         _: &(),
-//         _: &Connection,
-//         _: &QueueHandle<Self>,
-//     ) {
-//         if let wl_pointer::Event::Button { serial, button, .. } =  event {
-//             if let (Some((_, toplevel)), Some(seat)) = (&state.xdg_surface, &state.seat) {
-//                 if button == 272 {
-//                     toplevel._move(seat, serial);
-//                 } else if button == 273 {
-//                     toplevel.show_window_menu(seat, serial, 0, 0);
-//                 }
-//             }
-//         }
-//     }
-// }
+impl Dispatch<wl_pointer::WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_pointer::Event::Button { serial, button, .. } =  event {
+            if let (Some((_, toplevel)), Some(seat)) = (&state.xdg_surface, &state.seat) {
+                if button == 272 {
+                    toplevel._move(seat, serial);
+                } else if button == 273 {
+                    toplevel.show_window_menu(seat, serial, 0, 0);
+                }
+            }
+        }
+    }
+}
+
+impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        decor: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
+            if !unsafe { REQUESTED } {
+                unsafe { DONT_ACK = true };
+                decor.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+                decor.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSideOverlay);
+                unsafe { REQUESTED = true };
+            } else {
+                match mode {
+                    WEnum::Value(mode) => match mode {
+                        zxdg_toplevel_decoration_v1::Mode::ServerSide => {
+                            println!("Server side decoration supported");
+                        }
+                        zxdg_toplevel_decoration_v1::Mode::ServerSideOverlay => {
+                            println!("Server side overlay decoration supported");
+                        }
+                        _ => todo!(),
+                    },
+                    WEnum::Unknown(_) => todo!(),
+                }
+            }
+        }
+    }
+}
